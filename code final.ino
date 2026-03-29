@@ -1,48 +1,48 @@
- 
 #include <avr/io.h>
 #include <avr/pgmspace.h>
 #include <Arduino.h>
 #include <EEPROM.h>
 
+#define BTN_DIR A3
+#define BTN_MENU A2
 
-#define largeur 16
-#define hauteur 8
-#define largeur_pixel 8
-#define hauteur_pixel 8
-#define I2C_SCL PB2
-#define I2C_SDA PB0
+#define MAZE_W 16
+#define MAZE_H 8
+#define CELL_W 8
+#define CELL_H 8
+
+#define SSD1306_SCL PB2
+#define SSD1306_SDA PB0
 #define SSD1306_ADDR 0x78
-#define MPU6050_ADDR_W 0xD0
-#define MPU6050_ADDR_R 0xD1
+
+#define DIGITAL_WRITE_HIGH(PORT) PORTB |= (1 << PORT)
+#define DIGITAL_WRITE_LOW(PORT)  PORTB &= ~(1 << PORT)
+
 #define EEPROM_MAGIC_ADDR 0
 #define EEPROM_LEVEL_ADDR 1
 #define EEPROM_MAGIC 66
-#define menu_labttiny 0
-#define menu_principal 1
-#define menu_mode 2
-#define jeu 3
-#define victoire 4
-#define echec 5
-#define btn_direction A3
-#define btn_menu A2
-#define btn_jaune 1
-#define btn_vert 2
-#define btn_rouge 3
-#define btn_bleu 4
-#define btn_haut 1
-#define btn_droite 2
-#define btn_bas 3
-#define btn_gauche 4
-#define CONTROL_BUTTON 0
-#define CONTROL_MPU    1
-#define arrivee_ennemi 5000
-#define vitesse_ennemi 170
+
+#define STATE_TITLE 0
+#define STATE_MENU  1
+#define STATE_GAME  2
+#define STATE_WIN   3
+#define STATE_OVER  4
+
+#define BTN_YELLOW 1
+#define BTN_GREEN  2
+#define BTN_RED    3
+#define BTN_BLUE   4
+
+#define DIR_UP     1
+#define DIR_RIGHT  2
+#define DIR_DOWN   3
+#define DIR_LEFT   4
+
+#define ENEMY_DELAY_MS 5000
+#define ENEMY_STEP_MS 120
 #define MAX_HISTORY 100
-#define seuil_mpu 9000
 
-
-//on a defini les matrices des labyrinthes de chaque niveau : 0 represente le blanc et 1 represente le noir aka les murs
-const uint8_t level1[hauteur][largeur] PROGMEM = {
+const uint8_t level1[MAZE_H][MAZE_W] PROGMEM = {
   {0,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1},
   {1,0,1,0,1,0,1,0,1,0,1,1,1,1,0,1},
   {1,0,0,0,1,0,0,0,1,0,0,0,0,1,0,1},
@@ -53,7 +53,7 @@ const uint8_t level1[hauteur][largeur] PROGMEM = {
   {1,1,1,0,1,1,1,1,0,1,1,1,1,1,1,2}
 };
 
-const uint8_t level2[hauteur][largeur] PROGMEM = {
+const uint8_t level2[MAZE_H][MAZE_W] PROGMEM = {
   {0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0},
   {0,1,0,1,0,1,0,1,0,1,0,1,0,1,1,0},
   {0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,0},
@@ -64,18 +64,15 @@ const uint8_t level2[hauteur][largeur] PROGMEM = {
   {1,1,0,1,1,1,0,1,1,1,1,1,1,0,0,2}
 };
 
-uint8_t jx = 0; //coordonnees du joueur
-uint8_t jy = 0;
-uint8_t ex = 0;// coordonnees du joueur. 
-uint8_t ey = 0;
-
-uint8_t etat = menu_labttiny;
-uint8_t level_actuel = 1;
+uint8_t gameState = STATE_TITLE;
+uint8_t currentLevel = 1;
+uint8_t px = 0;
+uint8_t py = 0;
 uint8_t menuIndex = 0;
-uint8_t modeIndex = 0;
-uint8_t controlMode = CONTROL_BUTTON;
 unsigned long lastInputTime = 0;
 
+uint8_t ex = 0;
+uint8_t ey = 0;
 uint8_t moveHistory[MAX_HISTORY];
 uint8_t historyLen = 0;
 uint8_t enemyReadIndex = 0;
@@ -83,8 +80,7 @@ bool enemyActive = false;
 bool enemyWarningShown = false;
 unsigned long levelStartTime = 0;
 unsigned long lastEnemyStep = 0;
- 
-// police minimale
+
 const uint8_t fontA[5] = {0x7E,0x09,0x09,0x09,0x7E};
 const uint8_t fontB[5] = {0x7F,0x49,0x49,0x49,0x36};
 const uint8_t fontC[5] = {0x3E,0x41,0x41,0x41,0x22};
@@ -112,140 +108,63 @@ const uint8_t font2[5] = {0x62,0x51,0x49,0x49,0x46};
 const uint8_t fontGT[5] = {0x00,0x41,0x22,0x14,0x08};
 const uint8_t fontSpace[5] = {0,0,0,0,0};
 
-//protocol i2c: on a constate que les librairie tiny4OLED et mpu sont tres grandes mais il fallait le I2C donc on a 
-void i2c_sda_high() {
-   DDRB &= ~(1 << I2C_SDA); 
-   PORTB |= (1 << I2C_SDA);
-    }
-
-
-void i2c_sda_low()  {
-  
-   DDRB |=  (1 << I2C_SDA); 
-   PORTB &= ~(1 << I2C_SDA);
-   
-    }
-void i2c_scl_high() {
-  
-   DDRB &= ~(1 << I2C_SCL);
-    PORTB |= (1 << I2C_SCL); }
-
-
-void i2c_scl_low()  {
-  
-   DDRB |=  (1 << I2C_SCL); 
-   PORTB &= ~(1 << I2C_SCL); }
-
-uint8_t i2c_read_sda() { 
-  return (PINB & (1 << I2C_SDA)) ? 1 : 0; }
-
-void i2c_delay() { 
-  
-  delayMicroseconds(4);
-  
-   }
-
-void i2c_start() {
-  i2c_sda_high();
-  i2c_scl_high();
-  i2c_delay();
-  i2c_sda_low();
-  i2c_delay();
-  i2c_scl_low();
+void ssd1306_xfer_start(void) {
+  DIGITAL_WRITE_HIGH(SSD1306_SCL);
+  DIGITAL_WRITE_HIGH(SSD1306_SDA);
+  DIGITAL_WRITE_LOW(SSD1306_SDA);
+  DIGITAL_WRITE_LOW(SSD1306_SCL);
 }
 
-void i2c_stop() {
-  i2c_sda_low();
-  i2c_delay();
-  i2c_scl_high();
-  i2c_delay();
-  i2c_sda_high();
-  i2c_delay();
+void ssd1306_xfer_stop(void) {
+  DIGITAL_WRITE_LOW(SSD1306_SCL);
+  DIGITAL_WRITE_LOW(SSD1306_SDA);
+  DIGITAL_WRITE_HIGH(SSD1306_SCL);
+  DIGITAL_WRITE_HIGH(SSD1306_SDA);
 }
 
-bool i2c_write_byte(uint8_t b) {
+void ssd1306_send_byte(uint8_t b) {
   for (uint8_t i = 0; i < 8; i++) {
-
-    if (b & 0x80) i2c_sda_high();
-
-    else i2c_sda_low();
-
-    i2c_delay();
-    i2c_scl_high();
-    i2c_delay();
-    i2c_scl_low();
-    i2c_delay();
-    b <<= 1;
+    if ((b << i) & 0x80) DIGITAL_WRITE_HIGH(SSD1306_SDA);
+    else DIGITAL_WRITE_LOW(SSD1306_SDA);
+    DIGITAL_WRITE_HIGH(SSD1306_SCL);
+    DIGITAL_WRITE_LOW(SSD1306_SCL);
   }
-
-  i2c_sda_high();
-  i2c_delay();
-  i2c_scl_high();
-  i2c_delay();
-  bool ack = (i2c_read_sda()==0);
-  i2c_scl_low();
-  i2c_delay();
-  return ack;
+  DIGITAL_WRITE_HIGH(SSD1306_SDA);
+  DIGITAL_WRITE_HIGH(SSD1306_SCL);
+  DIGITAL_WRITE_LOW(SSD1306_SCL);
 }
-
-uint8_t i2c_read_byte(bool ack) {
-  uint8_t b = 0;
-  i2c_sda_high();
-
-  for (uint8_t i = 0; i < 8; i++) {
-    b <<= 1;
-    i2c_scl_high();
-    i2c_delay();
-    if (i2c_read_sda()) b |= 1;
-    i2c_scl_low();
-    i2c_delay();
-  }
-
-  if (ack) i2c_sda_low();
-  else i2c_sda_high();
-
-  i2c_delay();
-  i2c_scl_high();
-  i2c_delay();
-  i2c_scl_low();
-  i2c_delay();
-  i2c_sda_high();
-
-  return b;
-}
-
 
 void ssd1306_send_command(uint8_t cmd) {
-  i2c_start();
-  i2c_write_byte(SSD1306_ADDR);
-  i2c_write_byte(0x00);
-  i2c_write_byte(cmd);
-  i2c_stop();
+  ssd1306_xfer_start();
+  ssd1306_send_byte(SSD1306_ADDR);
+  ssd1306_send_byte(0x00);
+  ssd1306_send_byte(cmd);
+  ssd1306_xfer_stop();
 }
 
 void ssd1306_send_data_start(void) {
-  i2c_start();
-  i2c_write_byte(SSD1306_ADDR);
-  i2c_write_byte(0x40);
+  ssd1306_xfer_start();
+  ssd1306_send_byte(SSD1306_ADDR);
+  ssd1306_send_byte(0x40);
 }
 
 void ssd1306_send_data_stop(void) {
-  i2c_stop();
+  ssd1306_xfer_stop();
 }
 
 void ssd1306_setpos(uint8_t x, uint8_t page) {
-  i2c_start();
-  i2c_write_byte(SSD1306_ADDR);
-  i2c_write_byte(0x00);
-  i2c_write_byte(0xB0 + page);
-  i2c_write_byte(((x & 0xF0) >> 4) | 0x10);
-  i2c_write_byte((x & 0x0F) | 0x01);
-  i2c_stop();
+  ssd1306_xfer_start();
+  ssd1306_send_byte(SSD1306_ADDR);
+  ssd1306_send_byte(0x00);
+  ssd1306_send_byte(0xB0 + page);
+  ssd1306_send_byte(((x & 0xF0) >> 4) | 0x10);
+  ssd1306_send_byte((x & 0x0F) | 0x01);
+  ssd1306_xfer_stop();
 }
 
 void ssd1306_init(void) {
-  i2c_sda_high();
-  i2c_scl_high();
+  DDRB |= (1 << SSD1306_SDA);
+  DDRB |= (1 << SSD1306_SCL);
 
   ssd1306_send_command(0xAE);
   ssd1306_send_command(0xD5); ssd1306_send_command(0x80);
@@ -269,60 +188,9 @@ void fillScreen(uint8_t value) {
   for (uint8_t page = 0; page < 8; page++) {
     ssd1306_setpos(0, page);
     ssd1306_send_data_start();
-    for (uint8_t x = 0; x < 128; x++) i2c_write_byte(value);
+    for (uint8_t x = 0; x < 128; x++) ssd1306_send_byte(value);
     ssd1306_send_data_stop();
   }
-}
-
-// -------- MPU6050 --------
-void mpuWriteReg(uint8_t reg, uint8_t value) {
-  i2c_start();
-  i2c_write_byte(MPU6050_ADDR_W);
-  i2c_write_byte(reg);
-  i2c_write_byte(value);
-  i2c_stop();
-}
-
-uint8_t mpuReadReg(uint8_t reg) {
-  i2c_start();
-  i2c_write_byte(MPU6050_ADDR_W);
-  i2c_write_byte(reg);
-  i2c_start();
-  i2c_write_byte(MPU6050_ADDR_R);
-  uint8_t v = i2c_read_byte(false);
-  i2c_stop();
-  return v;
-}
-
-int16_t mpuRead16(uint8_t reg) {
-  i2c_start();
-  i2c_write_byte(MPU6050_ADDR_W);
-  i2c_write_byte(reg);
-  i2c_start();
-  i2c_write_byte(MPU6050_ADDR_R);
-  uint8_t hi = i2c_read_byte(true);
-  uint8_t lo = i2c_read_byte(false);
-  i2c_stop();
-  return (int16_t)((hi << 8) | lo);
-}
-
-void mpuInit() {
-  delay(100);
-  mpuWriteReg(0x6B, 0x00); // wake up
-  mpuWriteReg(0x1C, 0x00); // accel ±2g
-  mpuWriteReg(0x1B, 0x00); // gyro ±250°/s
-  mpuWriteReg(0x1A, 0x06); // low pass filter
-}
-
-uint8_t readMpuDir() {
-  int16_t ax = mpuRead16(0x3B);
-  int16_t ay = mpuRead16(0x3D);
-
-  if (ax > seuil_mpu) return btn_droite;
-  if (ax < -seuil_mpu) return btn_gauche;
-  if (ay > seuil_mpu) return btn_bas;
-  if (ay < -seuil_mpu) return btn_haut;
-  return 0;
 }
 
 const uint8_t* getGlyph(char c) {
@@ -360,8 +228,8 @@ void drawChar5x7(char c, uint8_t x, uint8_t page) {
   const uint8_t *g = getGlyph(c);
   ssd1306_setpos(x, page);
   ssd1306_send_data_start();
-  for (uint8_t i = 0; i < 5; i++) i2c_write_byte(g[i]);
-  i2c_write_byte(0x00);
+  for (uint8_t i = 0; i < 5; i++) ssd1306_send_byte(g[i]);
+  ssd1306_send_byte(0x00);
   ssd1306_send_data_stop();
 }
 
@@ -395,20 +263,20 @@ void clearSave() {
 }
 
 uint8_t readMenuButton() {
-  int val = analogRead(btn_menu);
-  if (val > 490 && val < 540) return btn_jaune;
-  if (val > 590 && val < 640) return btn_vert;
-  if (val > 660 && val < 700) return btn_rouge;
-  if (val > 710 && val < 760) return btn_bleu;
+  int val = analogRead(BTN_MENU);
+  if (val > 490 && val < 540) return BTN_YELLOW;
+  if (val > 590 && val < 640) return BTN_GREEN;
+  if (val > 660 && val < 700) return BTN_RED;
+  if (val > 710 && val < 750) return BTN_BLUE;
   return 0;
 }
 
-uint8_t readDirButtons() {
-  int val = analogRead(btn_direction);
-  if (val > 490 && val < 540) return btn_haut;
-  if (val > 590 && val < 640) return btn_droite;
-  if (val > 650 && val < 710) return btn_bas;
-  if (val > 710 && val < 760) return btn_gauche;
+uint8_t readDir() {
+  int val = analogRead(BTN_DIR);
+  if (val > 490 && val < 540) return DIR_UP;
+  if (val > 590 && val < 640) return DIR_RIGHT;
+  if (val > 650 && val < 710) return DIR_DOWN;
+  if (val > 710 && val < 760) return DIR_LEFT;
   return 0;
 }
 
@@ -419,7 +287,7 @@ bool inputReady(unsigned long d) {
 }
 
 uint8_t getCell(uint8_t x, uint8_t y) {
-  if (level_actuel == 1) return pgm_read_byte(&level1[y][x]);
+  if (currentLevel == 1) return pgm_read_byte(&level1[y][x]);
   return pgm_read_byte(&level2[y][x]);
 }
 
@@ -435,22 +303,21 @@ void resetEnemy() {
 }
 
 void loadLevel(uint8_t lvl) {
-  level_actuel = lvl;
-  jx = 0;
-  jy = 0;
+  currentLevel = lvl;
+  px = 0;
+  py = 0;
   saveLevel(lvl);
   resetEnemy();
 }
 
 void startNewGame() {
   loadLevel(1);
-  etat = jeu;
+  gameState = STATE_GAME;
 }
 
 void resumeGame() {
   loadLevel(getSavedLevel());
-  controlMode = CONTROL_BUTTON;
-  etat = jeu;
+  gameState = STATE_GAME;
 }
 
 void showLevelDone(uint8_t lvl) {
@@ -471,7 +338,7 @@ void showLevelGo(uint8_t lvl) {
   delay(1200);
 }
 
-void ecran_debut() {
+void drawTitleScreen() {
   fillScreen(0x00);
   drawText("LABTTINY", 40, 2);
   drawText("BLEU", 40, 5);
@@ -479,22 +346,13 @@ void ecran_debut() {
   drawText("CONTINUER", 20, 7);
 }
 
-void ecran_menu() {
+void drawMenuScreen() {
   fillScreen(0x00);
   drawText("MENU", 44, 1);
   if (menuIndex == 0) drawText(">", 18, 3);
   drawText("JOUER", 34, 3);
   if (menuIndex == 1) drawText(">", 18, 5);
   drawText("REPRENDRE", 34, 5);
-}
-
-void drawModeScreen() {
-  fillScreen(0x00);
-  drawText("MODE", 44, 1);
-  if (modeIndex == 0) drawText(">", 18, 3);
-  drawText("BOUTON", 28, 3);
-  if (modeIndex == 1) drawText(">", 18, 5);
-  drawText("MPU", 46, 5);
 }
 
 void drawWinScreen() {
@@ -516,41 +374,42 @@ void drawGameOverScreen() {
 }
 
 void nextLevel() {
-  if (level_actuel == 1) {
+  if (currentLevel == 1) {
     showLevelDone(1);
     showLevelGo(2);
     loadLevel(2);
   } else {
     showLevelDone(2);
     clearSave();
-    etat = victoire;
+    gameState = STATE_WIN;
     drawWinScreen();
   }
 }
 
 void triggerGameOver() {
-  etat = echec;
+  gameState = STATE_OVER;
   drawGameOverScreen();
   delay(1200);
-  etat = menu_principal;
+  gameState = STATE_MENU;
 }
 
 void recordMove(uint8_t dir) {
   if (historyLen < MAX_HISTORY) {
-    moveHistory[historyLen++] = dir;
+    moveHistory[historyLen] = dir;
+    historyLen++;
   }
 }
 
 void moveEnemyOneStep(uint8_t dir) {
-  if (dir == btn_haut && ey > 0) ey--;
-  if (dir == btn_droite && ex < largeur - 1) ex++;
-  if (dir == btn_bas && ey < hauteur - 1) ey++;
-  if (dir == btn_gauche && ex > 0) ex--;
+  if (dir == DIR_UP && ey > 0) ey--;
+  if (dir == DIR_RIGHT && ex < MAZE_W - 1) ex++;
+  if (dir == DIR_DOWN && ey < MAZE_H - 1) ey++;
+  if (dir == DIR_LEFT && ex > 0) ex--;
 }
 
 void updateEnemy() {
   if (!enemyActive) {
-    if (millis() - levelStartTime >= arrivee_ennemi) {
+    if (millis() - levelStartTime >= ENEMY_DELAY_MS) {
       enemyActive = true;
       if (!enemyWarningShown) {
         enemyWarningShown = true;
@@ -562,34 +421,38 @@ void updateEnemy() {
   }
 
   if (enemyReadIndex >= historyLen) return;
-  if (millis() - lastEnemyStep < vitesse_ennemi) return;
+  if (millis() - lastEnemyStep < ENEMY_STEP_MS) return;
 
   lastEnemyStep = millis();
   moveEnemyOneStep(moveHistory[enemyReadIndex]);
   enemyReadIndex++;
 
-  if (ex == jx && ey == jy) triggerGameOver();
+  if (ex == px && ey == py) {
+    triggerGameOver();
+  }
 }
 
 void movePlayer(int8_t dx, int8_t dy, uint8_t dirCode) {
-  int8_t nx = (int8_t)jx + dx;
-  int8_t ny = (int8_t)jy + dy;
-  if (nx < 0 || nx >= largeur || ny < 0 || ny >= hauteur) return;
+  int8_t nx = (int8_t)px + dx;
+  int8_t ny = (int8_t)py + dy;
+  if (nx < 0 || nx >= MAZE_W || ny < 0 || ny >= MAZE_H) return;
 
   uint8_t cell = getCell((uint8_t)nx, (uint8_t)ny);
 
   if (cell != 1) {
-    jx = (uint8_t)nx;
-    jy = (uint8_t)ny;
+    px = (uint8_t)nx;
+    py = (uint8_t)ny;
     recordMove(dirCode);
   }
 
-  if (enemyActive && ex == jx && ey == jy) {
+  if (enemyActive && ex == px && ey == py) {
     triggerGameOver();
     return;
   }
 
-  if (cell == 2) nextLevel();
+  if (cell == 2) {
+    nextLevel();
+  }
 }
 
 uint8_t getPageByte(uint8_t x, uint8_t page) {
@@ -597,31 +460,34 @@ uint8_t getPageByte(uint8_t x, uint8_t page) {
 
   for (uint8_t bit = 0; bit < 8; bit++) {
     uint8_t y = page * 8 + bit;
-    uint8_t cellX = x / largeur_pixel;
-    uint8_t cellY = y / hauteur_pixel;
+    uint8_t cellX = x / CELL_W;
+    uint8_t cellY = y / CELL_H;
     uint8_t pixelOn = 1;
     uint8_t cell = getCell(cellX, cellY);
 
     if (cell == 1) pixelOn = 0;
 
     if (cell == 2) {
-      uint8_t localX = x % largeur_pixel;
-      uint8_t localY = y % hauteur_pixel;
+      uint8_t localX = x % CELL_W;
+      uint8_t localY = y % CELL_H;
       if (localX >= 2 && localX <= 5 && localY >= 2 && localY <= 5) pixelOn = 0;
       else pixelOn = 1;
     }
 
-    if (cellX == jx && cellY == jy) {
-      uint8_t localX = x % largeur_pixel;
-      uint8_t localY = y % hauteur_pixel;
+    if (cellX == px && cellY == py) {
+      uint8_t localX = x % CELL_W;
+      uint8_t localY = y % CELL_H;
       if (localX >= 2 && localX <= 5 && localY >= 2 && localY <= 5) pixelOn = 0;
     }
 
     if (enemyActive && cellX == ex && cellY == ey) {
-      uint8_t localX = x % largeur_pixel;
-      uint8_t localY = y % hauteur_pixel;
+      uint8_t localX = x % CELL_W;
+      uint8_t localY = y % CELL_H;
       if (localX >= 1 && localX <= 3 && localY >= 1 && localY <= 3) pixelOn = 0;
     }
+
+    if (cellX == 0 && cellY == 0 && x == 0) pixelOn = 1;
+    if (cell == 2 && cellX == MAZE_W - 1 && x == 127) pixelOn = 1;
 
     if (pixelOn) byteOut |= (1 << bit);
   }
@@ -634,98 +500,70 @@ void drawGame() {
     ssd1306_setpos(0, page);
     ssd1306_send_data_start();
     for (uint8_t x = 0; x < 128; x++) {
-      i2c_write_byte(getPageByte(x, page));
+      ssd1306_send_byte(getPageByte(x, page));
     }
     ssd1306_send_data_stop();
   }
 }
 
 void setup() {
-  pinMode(btn_direction, INPUT);
-  pinMode(btn_menu, INPUT);
+  pinMode(BTN_DIR, INPUT);
+  pinMode(BTN_MENU, INPUT);
   ssd1306_init();
-  mpuInit();
-  ecran_debut();
+  drawTitleScreen();
 }
 
 void loop() {
   uint8_t menuBtn = readMenuButton();
-  uint8_t dirBtn = readDirButtons();
+  uint8_t dirBtn = readDir();
 
-  if (etat == menu_labttiny) {
-    ecran_debut();
-    if ((menuBtn == btn_bleu || menuBtn == btn_rouge) && inputReady(250)) {
-      etat = menu_principal;
+  if (gameState == STATE_TITLE) {
+    drawTitleScreen();
+    if (menuBtn == BTN_RED && inputReady(250)) {
+      gameState = STATE_MENU;
     }
     delay(30);
     return;
   }
 
-  if (etat == menu_principal) {
-    ecran_menu();
+  if (gameState == STATE_MENU) {
+    drawMenuScreen();
 
-    if ((dirBtn == btn_haut || dirBtn == btn_bas) && inputReady(180)) {
+    if ((dirBtn == DIR_UP || dirBtn == DIR_DOWN) && inputReady(180)) {
       menuIndex = 1 - menuIndex;
     }
 
-    if (menuBtn == btn_rouge && inputReady(250)) {
-      if (menuIndex == 0) {
-        etat = menu_mode;
-      } else {
-        resumeGame();
-      }
+    if (menuBtn == BTN_RED && inputReady(250)) {
+      if (menuIndex == 0) startNewGame();
+      else resumeGame();
     }
 
     delay(30);
     return;
   }
 
-  if (etat == menu_mode) {
-    drawModeScreen();
+  if (gameState == STATE_GAME) {
+    if (dirBtn == DIR_UP && inputReady(90)) movePlayer(0, -1, DIR_UP);
+    if (dirBtn == DIR_RIGHT && inputReady(90)) movePlayer(1, 0, DIR_RIGHT);
+    if (dirBtn == DIR_DOWN && inputReady(90)) movePlayer(0, 1, DIR_DOWN);
+    if (dirBtn == DIR_LEFT && inputReady(90)) movePlayer(-1, 0, DIR_LEFT);
 
-    if ((dirBtn == btn_haut || dirBtn == btn_bas) && inputReady(180)) {
-      modeIndex = 1 - modeIndex;
-    }
-
-    if (menuBtn == btn_rouge && inputReady(250)) {
-      controlMode = (modeIndex == 0) ? CONTROL_BUTTON : CONTROL_MPU;
-      startNewGame();
-    }
-
-    delay(30);
-    return;
-  }
-
-  if (etat == jeu) {
-    uint8_t dir = 0;
-
-    if (controlMode == CONTROL_BUTTON) {
-      dir = readDirButtons();
-    } else {
-      dir = readMpuDir();
-    }
-
-    if (dir == btn_haut && inputReady(90)) movePlayer(0, -1, btn_haut);
-    if (dir == btn_droite && inputReady(90)) movePlayer(1, 0, btn_droite);
-    if (dir == btn_bas && inputReady(90)) movePlayer(0, 1, btn_bas);
-    if (dir == btn_gauche && inputReady(90)) movePlayer(-1, 0, btn_gauche);
-
-    if (etat == jeu) updateEnemy();
-    if (etat == jeu) drawGame();
+    if (gameState == STATE_GAME) updateEnemy();
+    if (gameState == STATE_GAME) drawGame();
 
     delay(20);
     return;
   }
 
-  if (etat == victoire) {
+  if (gameState == STATE_WIN) {
     drawWinScreen();
-    if (menuBtn == btn_rouge && inputReady(250)) etat = menu_principal;
+    if (menuBtn == BTN_RED && inputReady(250)) startNewGame();
     delay(30);
     return;
   }
 
-  if (etat == echec) {
+  if (gameState == STATE_OVER) {
     delay(30);
     return;
   }
-}
+} 
