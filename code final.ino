@@ -1,48 +1,48 @@
+ 
 #include <avr/io.h>
 #include <avr/pgmspace.h>
 #include <Arduino.h>
 #include <EEPROM.h>
 
-#define BTN_DIR A3
-#define BTN_MENU A2
 
-#define MAZE_W 16
-#define MAZE_H 8
-#define CELL_W 8
-#define CELL_H 8
-
-#define SSD1306_SCL PB2
-#define SSD1306_SDA PB0
+#define largeur 16
+#define hauteur 8
+#define largeur_pixel 8
+#define hauteur_pixel 8
+#define I2C_SCL PB2
+#define I2C_SDA PB0
 #define SSD1306_ADDR 0x78
-
-#define DIGITAL_WRITE_HIGH(PORT) PORTB |= (1 << PORT)
-#define DIGITAL_WRITE_LOW(PORT)  PORTB &= ~(1 << PORT)
-
+#define MPU6050_ADDR_W 0xD0
+#define MPU6050_ADDR_R 0xD1
 #define EEPROM_MAGIC_ADDR 0
 #define EEPROM_LEVEL_ADDR 1
 #define EEPROM_MAGIC 66
+#define menu_labttiny 0
+#define menu_principal 1
+#define menu_mode 2
+#define jeu 3
+#define victoire 4
+#define echec 5
+#define btn_direction A3
+#define btn_menu A2
+#define btn_jaune 1
+#define btn_vert 2
+#define btn_rouge 3
+#define btn_bleu 4
+#define btn_haut 1
+#define btn_droite 2
+#define btn_bas 3
+#define btn_gauche 4
+#define CONTROL_BUTTON 0
+#define CONTROL_MPU    1
+#define arrivee_ennemi 5000
+#define vitesse_ennemi 170
+#define deplacement 100 //c'est la matrice qui stocke le deplacement du joueur pour que l'ennemi les refait. on s'est dit vu que en pratique yaura pas plus de 100 deplacement, ca prendra pas trop despace sur la ram de lattiny
+#define seuil_mpu 9000
 
-#define STATE_TITLE 0
-#define STATE_MENU  1
-#define STATE_GAME  2
-#define STATE_WIN   3
-#define STATE_OVER  4
 
-#define BTN_YELLOW 1
-#define BTN_GREEN  2
-#define BTN_RED    3
-#define BTN_BLUE   4
-
-#define DIR_UP     1
-#define DIR_RIGHT  2
-#define DIR_DOWN   3
-#define DIR_LEFT   4
-
-#define ENEMY_DELAY_MS 5000
-#define ENEMY_STEP_MS 120
-#define MAX_HISTORY 100
-
-const uint8_t level1[MAZE_H][MAZE_W] PROGMEM = {
+//on a defini les matrices des labyrinthes de chaque niveau : 0 represente le blanc et 1 represente le noir aka les murs
+const uint8_t level1[hauteur][largeur] PROGMEM = {
   {0,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1},
   {1,0,1,0,1,0,1,0,1,0,1,1,1,1,0,1},
   {1,0,0,0,1,0,0,0,1,0,0,0,0,1,0,1},
@@ -53,7 +53,7 @@ const uint8_t level1[MAZE_H][MAZE_W] PROGMEM = {
   {1,1,1,0,1,1,1,1,0,1,1,1,1,1,1,2}
 };
 
-const uint8_t level2[MAZE_H][MAZE_W] PROGMEM = {
+const uint8_t level2[hauteur][largeur] PROGMEM = {
   {0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0},
   {0,1,0,1,0,1,0,1,0,1,0,1,0,1,1,0},
   {0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,0},
@@ -64,23 +64,28 @@ const uint8_t level2[MAZE_H][MAZE_W] PROGMEM = {
   {1,1,0,1,1,1,0,1,1,1,1,1,1,0,0,2}
 };
 
-uint8_t gameState = STATE_TITLE;
-uint8_t currentLevel = 1;
-uint8_t px = 0;
-uint8_t py = 0;
+uint8_t jx = 0; //coordonnees du joueur
+uint8_t jy = 0;
+uint8_t ex = 0;// coordonnees du joueur. 
+uint8_t ey = 0;
+
+uint8_t etat = menu_labttiny;
+uint8_t level_actuel = 1;
 uint8_t menuIndex = 0;
+uint8_t modeIndex = 0;
+uint8_t controlMode = CONTROL_BUTTON;
 unsigned long lastInputTime = 0;
 
-uint8_t ex = 0;
-uint8_t ey = 0;
-uint8_t moveHistory[MAX_HISTORY];
-uint8_t historyLen = 0;
+uint8_t pas_ennemi[deplacement];
+uint8_t nbr_move = 0;
 uint8_t enemyReadIndex = 0;
 bool enemyActive = false;
 bool enemyWarningShown = false;
 unsigned long levelStartTime = 0;
 unsigned long lastEnemyStep = 0;
-
+ 
+// on a essaye de faire avec des librairie de texte mais le texte ne s'affichait ps sur l'ecran et il yavait des symboles bizarres. on a vu qlors qu'on 
+//pouvait definir chaque lettre manuellement, et uniquement les lettres qui nous interessait. economie de mémoire!!! Chaque octet représente une colonne verticale de pixels (bit 0 = haut, bit 6 = bas)
 const uint8_t fontA[5] = {0x7E,0x09,0x09,0x09,0x7E};
 const uint8_t fontB[5] = {0x7F,0x49,0x49,0x49,0x36};
 const uint8_t fontC[5] = {0x3E,0x41,0x41,0x41,0x22};
@@ -108,63 +113,142 @@ const uint8_t font2[5] = {0x62,0x51,0x49,0x49,0x46};
 const uint8_t fontGT[5] = {0x00,0x41,0x22,0x14,0x08};
 const uint8_t fontSpace[5] = {0,0,0,0,0};
 
-void ssd1306_xfer_start(void) {
-  DIGITAL_WRITE_HIGH(SSD1306_SCL);
-  DIGITAL_WRITE_HIGH(SSD1306_SDA);
-  DIGITAL_WRITE_LOW(SSD1306_SDA);
-  DIGITAL_WRITE_LOW(SSD1306_SCL);
+//protocol i2c: on a constate que les librairie tiny4OLED et mpu sont tres grandes et l'ecran ne s'allumait pas. la solution: rediger les registres i2c à la main .... 
+void i2c_sda_high() {
+   DDRB &= ~(1 << I2C_SDA); //Configure la pin comme entrée
+   PORTB |= (1 << I2C_SDA);//Active la résistance de pull-up interne, la ligne monte à HIGH grâce au pull-up. 
+    }
+
+
+void i2c_sda_low()  {
+  
+   DDRB |=  (1 << I2C_SDA); //Configure la pin comme sortie.
+   PORTB &= ~(1 << I2C_SDA);// pull down, valeur 0.
+   
+    }
+void i2c_scl_high() {
+  
+   DDRB &= ~(1 << I2C_SCL);
+    PORTB |= (1 << I2C_SCL); } // meme logique 
+
+
+
+void i2c_scl_low()  {
+  
+   DDRB |=  (1 << I2C_SCL); 
+   PORTB &= ~(1 << I2C_SCL); }
+
+uint8_t i2c_read_sda() { 
+  return (PINB & (1 << I2C_SDA)) ? 1 : 0; } //lecture des etats. Utilisé pour lire les données et les acquittements (ACK).
+
+void i2c_delay() { 
+  
+  delayMicroseconds(4);
+  
+   }
+
+void i2c_start() {
+  i2c_sda_high();
+  i2c_scl_high();
+  i2c_delay();
+  i2c_sda_low();
+  i2c_delay();
+  i2c_scl_low();
 }
 
-void ssd1306_xfer_stop(void) {
-  DIGITAL_WRITE_LOW(SSD1306_SCL);
-  DIGITAL_WRITE_LOW(SSD1306_SDA);
-  DIGITAL_WRITE_HIGH(SSD1306_SCL);
-  DIGITAL_WRITE_HIGH(SSD1306_SDA);
+void i2c_stop() {
+  i2c_sda_low();
+  i2c_delay();
+  i2c_scl_high();
+  i2c_delay();
+  i2c_sda_high();
+  i2c_delay();
 }
 
-void ssd1306_send_byte(uint8_t b) {
+bool i2c_write_byte(uint8_t b) {
   for (uint8_t i = 0; i < 8; i++) {
-    if ((b << i) & 0x80) DIGITAL_WRITE_HIGH(SSD1306_SDA);
-    else DIGITAL_WRITE_LOW(SSD1306_SDA);
-    DIGITAL_WRITE_HIGH(SSD1306_SCL);
-    DIGITAL_WRITE_LOW(SSD1306_SCL);
+
+    if (b & 0x80) i2c_sda_high();
+
+    else i2c_sda_low();
+
+    i2c_delay();
+    i2c_scl_high();
+    i2c_delay();
+    i2c_scl_low();
+    i2c_delay();
+    b <<= 1;
   }
-  DIGITAL_WRITE_HIGH(SSD1306_SDA);
-  DIGITAL_WRITE_HIGH(SSD1306_SCL);
-  DIGITAL_WRITE_LOW(SSD1306_SCL);
+
+  i2c_sda_high();
+  i2c_delay();
+  i2c_scl_high();
+  i2c_delay();
+  bool ack = (i2c_read_sda()==0);
+  i2c_scl_low();
+  i2c_delay();
+  return ack;
 }
+
+uint8_t i2c_read_byte(bool ack) {
+  uint8_t b = 0;
+  i2c_sda_high();
+
+  for (uint8_t i = 0; i < 8; i++) {
+    b <<= 1;
+    i2c_scl_high();
+    i2c_delay();
+    if (i2c_read_sda()) b |= 1;
+    i2c_scl_low();
+    i2c_delay();
+  }
+
+  if (ack) i2c_sda_low();
+  else i2c_sda_high();
+
+  i2c_delay();
+  i2c_scl_high();
+  i2c_delay();
+  i2c_scl_low();
+  i2c_delay();
+  i2c_sda_high();
+
+  return b;
+}
+//ecriture et lecture des bits.
 
 void ssd1306_send_command(uint8_t cmd) {
-  ssd1306_xfer_start();
-  ssd1306_send_byte(SSD1306_ADDR);
-  ssd1306_send_byte(0x00);
-  ssd1306_send_byte(cmd);
-  ssd1306_xfer_stop();
+  i2c_start();
+  i2c_write_byte(SSD1306_ADDR);
+  i2c_write_byte(0x00);
+  i2c_write_byte(cmd);
+  i2c_stop();
 }
-
+//cette partie est pour la configuration de la communication avec l'ecran. les fonctions ci dessous sont utilise pour envoyer des commandes, positionner le cursseu
+//initialiser l'ecran et le remplir. 
 void ssd1306_send_data_start(void) {
-  ssd1306_xfer_start();
-  ssd1306_send_byte(SSD1306_ADDR);
-  ssd1306_send_byte(0x40);
+  i2c_start();
+  i2c_write_byte(SSD1306_ADDR);
+  i2c_write_byte(0x40);
 }
 
 void ssd1306_send_data_stop(void) {
-  ssd1306_xfer_stop();
+  i2c_stop();
 }
 
 void ssd1306_setpos(uint8_t x, uint8_t page) {
-  ssd1306_xfer_start();
-  ssd1306_send_byte(SSD1306_ADDR);
-  ssd1306_send_byte(0x00);
-  ssd1306_send_byte(0xB0 + page);
-  ssd1306_send_byte(((x & 0xF0) >> 4) | 0x10);
-  ssd1306_send_byte((x & 0x0F) | 0x01);
-  ssd1306_xfer_stop();
+  i2c_start();
+  i2c_write_byte(SSD1306_ADDR);
+  i2c_write_byte(0x00);
+  i2c_write_byte(0xB0 + page);
+  i2c_write_byte(((x & 0xF0) >> 4) | 0x10);
+  i2c_write_byte((x & 0x0F) | 0x01);
+  i2c_stop();
 }
 
 void ssd1306_init(void) {
-  DDRB |= (1 << SSD1306_SDA);
-  DDRB |= (1 << SSD1306_SCL);
+  i2c_sda_high();
+  i2c_scl_high();
 
   ssd1306_send_command(0xAE);
   ssd1306_send_command(0xD5); ssd1306_send_command(0x80);
@@ -188,12 +272,66 @@ void fillScreen(uint8_t value) {
   for (uint8_t page = 0; page < 8; page++) {
     ssd1306_setpos(0, page);
     ssd1306_send_data_start();
-    for (uint8_t x = 0; x < 128; x++) ssd1306_send_byte(value);
+    for (uint8_t x = 0; x < 128; x++) i2c_write_byte(value);
     ssd1306_send_data_stop();
   }
 }
 
-const uint8_t* getGlyph(char c) {
+//comm MPU
+void mpuWriteReg(uint8_t reg, uint8_t value) {
+  i2c_start();
+  i2c_write_byte(MPU6050_ADDR_W);
+  i2c_write_byte(reg);
+  i2c_write_byte(value);
+  i2c_stop();
+}
+
+uint8_t mpuReadReg(uint8_t reg) {
+  i2c_start();
+  i2c_write_byte(MPU6050_ADDR_W);
+  i2c_write_byte(reg);
+  i2c_start();
+  i2c_write_byte(MPU6050_ADDR_R);
+  uint8_t v = i2c_read_byte(false);
+  i2c_stop();
+  return v;
+}
+
+int16_t mpuRead16(uint8_t reg) {
+  i2c_start();
+  i2c_write_byte(MPU6050_ADDR_W);
+  i2c_write_byte(reg);
+  i2c_start();
+  i2c_write_byte(MPU6050_ADDR_R);
+  uint8_t hi = i2c_read_byte(true);
+  uint8_t lo = i2c_read_byte(false);
+  i2c_stop();
+  return (int16_t)((hi << 8) | lo);
+}
+
+void mpuInit() {
+  delay(100);
+  mpuWriteReg(0x6B, 0x00); // wake up
+  mpuWriteReg(0x1C, 0x00); // accel ±2g
+  mpuWriteReg(0x1B, 0x00); // gyro ±250°/s
+  mpuWriteReg(0x1A, 0x06); // low pass filter
+}
+
+uint8_t readMpuDir() {
+  int16_t ax = mpuRead16(0x3B);
+  int16_t ay = mpuRead16(0x3D);
+
+  if (ax > seuil_mpu) return btn_droite;
+  if (ax < -seuil_mpu) return btn_gauche;
+  if (ay > seuil_mpu) return btn_bas;
+  if (ay < -seuil_mpu) return btn_haut;
+  return 0;
+}
+
+
+
+
+const uint8_t* getGlyph(char c) { //ce pointeur pointe vers le tableau des lettres utilise en haut. cette methode a ete vu sur stackoverflow. 
   switch (c) {
     case 'A': return fontA;
     case 'B': return fontB;
@@ -228,8 +366,8 @@ void drawChar5x7(char c, uint8_t x, uint8_t page) {
   const uint8_t *g = getGlyph(c);
   ssd1306_setpos(x, page);
   ssd1306_send_data_start();
-  for (uint8_t i = 0; i < 5; i++) ssd1306_send_byte(g[i]);
-  ssd1306_send_byte(0x00);
+  for (uint8_t i = 0; i < 5; i++) i2c_write_byte(g[i]);
+  i2c_write_byte(0x00);
   ssd1306_send_data_stop();
 }
 
@@ -241,6 +379,8 @@ void drawText(const char* txt, uint8_t x, uint8_t page) {
   }
 }
 
+
+//on vouilait sauvegrader l'etat actuel du niveau dans la memoire eeprom
 void saveLevel(uint8_t lvl) {
   EEPROM.update(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
   EEPROM.update(EEPROM_LEVEL_ADDR, lvl);
@@ -262,64 +402,71 @@ void clearSave() {
   EEPROM.update(EEPROM_LEVEL_ADDR, 1);
 }
 
+
+//lecture des valeurs analogique des boutons et determination d'une plage de tensions
 uint8_t readMenuButton() {
-  int val = analogRead(BTN_MENU);
-  if (val > 490 && val < 540) return BTN_YELLOW;
-  if (val > 590 && val < 640) return BTN_GREEN;
-  if (val > 660 && val < 700) return BTN_RED;
-  if (val > 710 && val < 750) return BTN_BLUE;
+  int val = analogRead(btn_menu);
+  if (val > 490 && val < 540) return btn_jaune;
+  if (val > 590 && val < 640) return btn_vert;
+  if (val > 660 && val < 700) return btn_rouge;
+  if (val > 710 && val < 760) return btn_bleu;
   return 0;
 }
 
-uint8_t readDir() {
-  int val = analogRead(BTN_DIR);
-  if (val > 490 && val < 540) return DIR_UP;
-  if (val > 590 && val < 640) return DIR_RIGHT;
-  if (val > 650 && val < 710) return DIR_DOWN;
-  if (val > 710 && val < 760) return DIR_LEFT;
+uint8_t readDirButtons() {
+  int val = analogRead(btn_direction);
+  if (val > 490 && val < 540) return btn_haut;
+  if (val > 590 && val < 640) return btn_droite;
+  if (val > 650 && val < 710) return btn_bas;
+  if (val > 710 && val < 760) return btn_gauche;
   return 0;
 }
 
+
+// retourne true seulement si au moins d temps_ecouleecondes se sont écoulées depuis la dernière entrée acceptée. Évite les doubles appuis et le déplacement trop rapide.
 bool inputReady(unsigned long d) {
-  if (millis() - lastInputTime < d) return false;
-  lastInputTime = millis();
+  if (temps_ecoule() - lastInputTime < d) return false;
+  lastInputTime = temps_ecoule();
   return true;
 }
 
+//acces au labyrinthe car les donnes sont stockes dans la memoire flash donc on doit faire une fonction qui y accede/
 uint8_t getCell(uint8_t x, uint8_t y) {
-  if (currentLevel == 1) return pgm_read_byte(&level1[y][x]);
+  if (level_actuel == 1) return pgm_read_byte(&level1[y][x]);
   return pgm_read_byte(&level2[y][x]);
 }
+
 
 void resetEnemy() {
   ex = 0;
   ey = 0;
-  historyLen = 0;
+  nbr_move = 0;
   enemyReadIndex = 0;
   enemyActive = false;
   enemyWarningShown = false;
-  levelStartTime = millis();
-  lastEnemyStep = millis();
+  levelStartTime = temps_ecoule();
+  lastEnemyStep = temps_ecoule();
 }
 
 void loadLevel(uint8_t lvl) {
-  currentLevel = lvl;
-  px = 0;
-  py = 0;
+  level_actuel = lvl;
+  jx = 0;
+  jy = 0;
   saveLevel(lvl);
   resetEnemy();
 }
 
 void startNewGame() {
   loadLevel(1);
-  gameState = STATE_GAME;
+  etat = jeu;
 }
 
 void resumeGame() {
   loadLevel(getSavedLevel());
-  gameState = STATE_GAME;
+  controlMode = CONTROL_BUTTON;
+  etat = jeu;
 }
-
+//ecriture des textes des menus.
 void showLevelDone(uint8_t lvl) {
   fillScreen(0x00);
   drawText("LEVEL", 34, 2);
@@ -338,7 +485,7 @@ void showLevelGo(uint8_t lvl) {
   delay(1200);
 }
 
-void drawTitleScreen() {
+void ecran_debut() {
   fillScreen(0x00);
   drawText("LABTTINY", 40, 2);
   drawText("BLEU", 40, 5);
@@ -346,13 +493,22 @@ void drawTitleScreen() {
   drawText("CONTINUER", 20, 7);
 }
 
-void drawMenuScreen() {
+void ecran_menu() {
   fillScreen(0x00);
   drawText("MENU", 44, 1);
   if (menuIndex == 0) drawText(">", 18, 3);
   drawText("JOUER", 34, 3);
   if (menuIndex == 1) drawText(">", 18, 5);
   drawText("REPRENDRE", 34, 5);
+}
+
+void drawModeScreen() {
+  fillScreen(0x00);
+  drawText("MODE", 44, 1);
+  if (modeIndex == 0) drawText(">", 18, 3);
+  drawText("BOUTON", 28, 3);
+  if (modeIndex == 1) drawText(">", 18, 5);
+  drawText("MPU", 46, 5);
 }
 
 void drawWinScreen() {
@@ -373,45 +529,52 @@ void drawGameOverScreen() {
   drawText("PERDU", 34, 3);
 }
 
+//logique des niveaux: qd le joueur atteint la sortie (case 2 dans la matrice du labyrinthe: si il etait au niveau 1, il passe au niveau 2, sil est au niveau 2,
+//il est dans l'etat victoire.
 void nextLevel() {
-  if (currentLevel == 1) {
+  if (level_actuel == 1) {
     showLevelDone(1);
     showLevelGo(2);
     loadLevel(2);
   } else {
     showLevelDone(2);
     clearSave();
-    gameState = STATE_WIN;
+    etat = victoire;
     drawWinScreen();
   }
 }
 
 void triggerGameOver() {
-  gameState = STATE_OVER;
+  etat = echec;
   drawGameOverScreen();
   delay(1200);
-  gameState = STATE_MENU;
+  etat = menu_principal;
 }
 
+
+//enregistrement des pas du joeur
 void recordMove(uint8_t dir) {
-  if (historyLen < MAX_HISTORY) {
-    moveHistory[historyLen] = dir;
-    historyLen++;
+  if (nbr_move < deplacement) {
+    pas_ennemi[nbr_move++] = dir;
   }
 }
 
+//l'ennemi va utiliser dir pour se deplacer.
 void moveEnemyOneStep(uint8_t dir) {
-  if (dir == DIR_UP && ey > 0) ey--;
-  if (dir == DIR_RIGHT && ex < MAZE_W - 1) ex++;
-  if (dir == DIR_DOWN && ey < MAZE_H - 1) ey++;
-  if (dir == DIR_LEFT && ex > 0) ex--;
+  if (dir == btn_haut && ey > 0) ey--;
+  if (dir == btn_droite && ex < largeur - 1) ex++;
+  if (dir == btn_bas && ey < hauteur - 1) ey++;
+  if (dir == btn_gauche && ex > 0) ex--;
 }
 
+//Pendant les 5 premières secondes ,  l'ennemi est inactif.
+//Après 5 secondes , l'ennemi s'active,  "ENNEMI SORTI" avec la fonction show ennemy warning.
 void updateEnemy() {
   if (!enemyActive) {
-    if (millis() - levelStartTime >= ENEMY_DELAY_MS) {
+    if (temps_ecoule() - levelStartTime >= arrivee_ennemi) { //si 5 secondes se sont ecoule depuis le start du niveau et le temps actuel, l'eenemi sort de sa caverne
       enemyActive = true;
-      if (!enemyWarningShown) {
+      if (!enemyWarningShown) { ,//on a ete oblige de mettre cette condition qui evite que le emssage ennemi sorti s'affiche plusieurs fois. dans nos test il a ete affiche chaque 5 secondes
+      //donc on a fait cette condition
         enemyWarningShown = true;
         showEnemyWarning();
       }
@@ -420,74 +583,76 @@ void updateEnemy() {
     }
   }
 
-  if (enemyReadIndex >= historyLen) return;
-  if (millis() - lastEnemyStep < ENEMY_STEP_MS) return;
+  if (enemyReadIndex >= nbr_move) return;
+  if (temps_ecoule() - lastEnemyStep < vitesse_ennemi) return;
 
-  lastEnemyStep = millis();
-  moveEnemyOneStep(moveHistory[enemyReadIndex]);
+  lastEnemyStep = temps_ecoule();
+  moveEnemyOneStep(pas_ennemi[enemyReadIndex]); //On déplace l'ennemi d'un pas dans la direction stockée à l'index enemyReadIndex du tableau pas_ennemi[]
   enemyReadIndex++;
 
-  if (ex == px && ey == py) {
-    triggerGameOver();
-  }
+  if (ex == jx && ey == jy) triggerGameOver();
 }
+ // Calcule la nouvelle position en ajoutant le déplacement (dx, dy).
+//Vérifie les limites du terrain.
+//Vérifie si c'est un mur (cell == 1) : si oui, le joueur ne bouge pas.
+
 
 void movePlayer(int8_t dx, int8_t dy, uint8_t dirCode) {
-  int8_t nx = (int8_t)px + dx;
-  int8_t ny = (int8_t)py + dy;
-  if (nx < 0 || nx >= MAZE_W || ny < 0 || ny >= MAZE_H) return;
+  int8_t nx = (int8_t)jx + dx;
+  int8_t ny = (int8_t)jy + dy;
+  if (nx < 0 || nx >= largeur || ny < 0 || ny >= hauteur) return;
 
   uint8_t cell = getCell((uint8_t)nx, (uint8_t)ny);
 
-  if (cell != 1) {
-    px = (uint8_t)nx;
-    py = (uint8_t)ny;
-    recordMove(dirCode);
+  if (cell != 1) {   //le joueur se deplace vu que cest pas un mur
+    jx = (uint8_t)nx;
+    jy = (uint8_t)ny;
+    recordMove(dirCode); 
   }
 
-  if (enemyActive && ex == px && ey == py) {
-    triggerGameOver();
+  if (enemyActive && ex == jx && ey == jy) {
+    triggerGameOver(); 
     return;
-  }
+  } //si les coordoones de l'ennemi et du joueur sont les memes = partie perdue
 
-  if (cell == 2) {
-    nextLevel();
-  }
+  if (cell == 2) nextLevel(); // victoire ou passage au niveau suivant car il a atteinr la sortie.
 }
+
+
+
+//L'écran SSD1306 stocke les pixels en colonnes de 8 bits (une "page"). Cette fonction calcule un octet (8 pixels verticaux) pour une colonne x donnée dans une page donnée.
+//Calcule les coordonnées pixel (x, y) et détermine à quelle cellule du labyrinthe ce pixel appartient
 
 uint8_t getPageByte(uint8_t x, uint8_t page) {
   uint8_t byteOut = 0x00;
 
   for (uint8_t bit = 0; bit < 8; bit++) {
     uint8_t y = page * 8 + bit;
-    uint8_t cellX = x / CELL_W;
-    uint8_t cellY = y / CELL_H;
+    uint8_t cellX = x / largeur_pixel;
+    uint8_t cellY = y / hauteur_pixel;
     uint8_t pixelOn = 1;
     uint8_t cell = getCell(cellX, cellY);
 
     if (cell == 1) pixelOn = 0;
 
     if (cell == 2) {
-      uint8_t localX = x % CELL_W;
-      uint8_t localY = y % CELL_H;
+      uint8_t localX = x % largeur_pixel;
+      uint8_t localY = y % hauteur_pixel;
       if (localX >= 2 && localX <= 5 && localY >= 2 && localY <= 5) pixelOn = 0;
       else pixelOn = 1;
     }
 
-    if (cellX == px && cellY == py) {
-      uint8_t localX = x % CELL_W;
-      uint8_t localY = y % CELL_H;
+    if (cellX == jx && cellY == jy) {
+      uint8_t localX = x % largeur_pixel;
+      uint8_t localY = y % hauteur_pixel;
       if (localX >= 2 && localX <= 5 && localY >= 2 && localY <= 5) pixelOn = 0;
     }
 
     if (enemyActive && cellX == ex && cellY == ey) {
-      uint8_t localX = x % CELL_W;
-      uint8_t localY = y % CELL_H;
+      uint8_t localX = x % largeur_pixel;
+      uint8_t localY = y % hauteur_pixel;
       if (localX >= 1 && localX <= 3 && localY >= 1 && localY <= 3) pixelOn = 0;
     }
-
-    if (cellX == 0 && cellY == 0 && x == 0) pixelOn = 1;
-    if (cell == 2 && cellX == MAZE_W - 1 && x == 127) pixelOn = 1;
 
     if (pixelOn) byteOut |= (1 << bit);
   }
@@ -495,75 +660,112 @@ uint8_t getPageByte(uint8_t x, uint8_t page) {
   return byteOut;
 }
 
+//on dessine le jeu
 void drawGame() {
   for (uint8_t page = 0; page < 8; page++) {
     ssd1306_setpos(0, page);
     ssd1306_send_data_start();
     for (uint8_t x = 0; x < 128; x++) {
-      ssd1306_send_byte(getPageByte(x, page));
+      i2c_write_byte(getPageByte(x, page));
     }
     ssd1306_send_data_stop();
   }
 }
-
+//on configure les broches des boutons en input et on inituaise lecran et le mpu et on affiche le menu de demarrage.
 void setup() {
-  pinMode(BTN_DIR, INPUT);
-  pinMode(BTN_MENU, INPUT);
+  pinMode(btn_direction, INPUT);
+  pinMode(btn_menu, INPUT);
   ssd1306_init();
-  drawTitleScreen();
+  mpuInit();
+  ecran_debut();
 }
 
+//À chaque itération, lit les deux groupes de boutons.
 void loop() {
   uint8_t menuBtn = readMenuButton();
-  uint8_t dirBtn = readDir();
+  uint8_t dirBtn = readDirButtons();
 
-  if (gameState == STATE_TITLE) {
-    drawTitleScreen();
-    if (menuBtn == BTN_RED && inputReady(250)) {
-      gameState = STATE_MENU;
+
+//gere le lancement de chaque etat
+  if (etat == menu_labttiny) {
+    ecran_debut();
+    if ((menuBtn == btn_bleu || menuBtn == btn_rouge) && inputReady(250)) { //enfaite a un moment, qd on appuyait sur le bouton bleu ou rouge et ca lancais
+    //la deuxieme page du menu donc on savait pas quoi mettre car ca depend de la lecture des valeur analogique donc on a decide de faire les 2 in case.
+      etat = menu_principal;
     }
     delay(30);
     return;
   }
 
-  if (gameState == STATE_MENU) {
-    drawMenuScreen();
+  if (etat == menu_principal) {
+    ecran_menu();
 
-    if ((dirBtn == DIR_UP || dirBtn == DIR_DOWN) && inputReady(180)) {
-      menuIndex = 1 - menuIndex;
+    if ((dirBtn == btn_haut || dirBtn == btn_bas) && inputReady(180)) {
+      menuIndex = 1 - menuIndex; //on deplacer le curseur.
     }
 
-    if (menuBtn == BTN_RED && inputReady(250)) {
-      if (menuIndex == 0) startNewGame();
-      else resumeGame();
+    if (menuBtn == btn_rouge && inputReady(250)) {
+      if (menuIndex == 0) {
+        etat = menu_mode;
+      } else {
+        resumeGame();
+      }
     }
 
     delay(30);
     return;
   }
 
-  if (gameState == STATE_GAME) {
-    if (dirBtn == DIR_UP && inputReady(90)) movePlayer(0, -1, DIR_UP);
-    if (dirBtn == DIR_RIGHT && inputReady(90)) movePlayer(1, 0, DIR_RIGHT);
-    if (dirBtn == DIR_DOWN && inputReady(90)) movePlayer(0, 1, DIR_DOWN);
-    if (dirBtn == DIR_LEFT && inputReady(90)) movePlayer(-1, 0, DIR_LEFT);
+  if (etat == menu_mode) {
+    drawModeScreen();
 
-    if (gameState == STATE_GAME) updateEnemy();
-    if (gameState == STATE_GAME) drawGame();
+    if ((dirBtn == btn_haut || dirBtn == btn_bas) && inputReady(180)) {
+      modeIndex = 1 - modeIndex;
+    }
+
+    if (menuBtn == btn_rouge && inputReady(250)) {
+      controlMode = (modeIndex == 0) ? CONTROL_BUTTON : CONTROL_MPU;
+      startNewGame();
+    }
+
+    delay(30);
+    return;
+  }
+
+  if (etat == jeu) {
+    uint8_t dir = 0;
+
+    if (controlMode == CONTROL_BUTTON) {
+      dir = readDirButtons();
+    } else {
+      dir = readMpuDir();
+    }
+
+    if (dir == btn_haut && inputReady(90)) movePlayer(0, -1, btn_haut);
+    if (dir == btn_droite && inputReady(90)) movePlayer(1, 0, btn_droite);
+    if (dir == btn_bas && inputReady(90)) movePlayer(0, 1, btn_bas);
+    if (dir == btn_gauche && inputReady(90)) movePlayer(-1, 0, btn_gauche);
+
+    if (etat == jeu) updateEnemy();
+    if (etat == jeu) drawGame();
 
     delay(20);
     return;
   }
 
-  if (gameState == STATE_WIN) {
+  if (etat == victoire) {
     drawWinScreen();
-    if (menuBtn == BTN_RED && inputReady(250)) startNewGame();
+    if (menuBtn == btn_rouge && inputReady(250)) etat = menu_principal;
     delay(30);
     return;
   }
 
-  if (gameState == STATE_OVER) {
+  if (etat == echec) {
     delay(30);
     return;
   }
-} 
+}
+
+//on a durement appris que chaque tableau necessitait un index ou un curseur. et le curseur etait lier a une variable. 
+//on a aussi appris que faire une fonction pour TOUT et absolument TOUT est une bonne idee pour mettre nos idees au clair. 
+
