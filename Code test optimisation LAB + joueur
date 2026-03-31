@@ -1,0 +1,83 @@
+#include <Tiny4kOLED.h>
+#include <avr/pgmspace.h>
+
+#define BTN_DIR  A2
+#define BTN_MENU A3
+
+#define CELL_W 16
+#define CELL_H 8
+
+const uint8_t maze[8][8] PROGMEM = {
+  {1,1,1,1,1,1,1,1},
+  {1,0,0,0,1,0,0,1},
+  {1,0,1,0,1,0,1,1},
+  {1,0,1,0,0,0,0,1},
+  {1,0,1,1,1,1,0,1},
+  {1,0,0,0,0,1,0,1},
+  {1,1,1,1,0,0,0,1},
+  {1,1,1,1,1,1,1,1}
+};
+
+uint8_t px = 1;
+uint8_t py = 1;
+
+uint8_t getCell(uint8_t x, uint8_t y) {
+  return pgm_read_byte(&maze[y][x]);
+}
+
+void move(int8_t dx, int8_t dy) {
+  uint8_t nx = px + dx;
+  uint8_t ny = py + dy;
+
+  if (getCell(nx, ny) == 0) {
+    px = nx;
+    py = ny;
+  }
+}
+
+uint8_t readDir() {
+  int val = analogRead(BTN_DIR);
+
+  if (val > 490 && val < 540) return 1; // haut
+  if (val > 590 && val < 640) return 2; // droite
+  if (val > 650 && val < 710) return 3; // bas
+  if (val > 710 && val < 760) return 4; // gauche
+
+  return 0;
+}
+
+void draw() {
+  oled.clear();
+
+  for (uint8_t y = 0; y < 8; y++) {
+    for (uint8_t x = 0; x < 8; x++) {
+      if (getCell(x, y)) {
+        oled.fillRect(x * CELL_W, y * CELL_H, CELL_W, CELL_H, WHITE);
+      }
+    }
+  }
+
+  // joueur plus petit que la cellule
+  oled.fillRect(px * CELL_W + 4, py * CELL_H + 2, CELL_W - 8, CELL_H - 4, WHITE);
+
+  oled.display();
+}
+
+void setup() {
+  oled.begin();
+  oled.clear();
+  oled.on();
+}
+
+void loop() {
+  uint8_t dir = readDir();
+
+  if (dir == 1) move(0, -1);
+  if (dir == 2) move(1, 0);
+  if (dir == 3) move(0, 1);
+  if (dir == 4) move(-1, 0);
+
+  draw();
+
+  delay(120);
+}
